@@ -483,6 +483,20 @@
         </div>
       </div>
 
+      <div id="userActivitySection">
+        <div class="section-title">Atividade da equipe</div>
+        <div class="card" id="userActivityResult"></div>
+
+        <div class="section-title">Histórico de acessos (login)</div>
+        <div class="card" id="loginLogList" style="padding:4px 12px;">
+          <div class="empty" id="loginLogEmpty">
+            <div class="mark"></div>
+            <div class="empty-title">Sem registros ainda</div>
+            <div class="empty-sub">Todo login aparece aqui, com data e hora.</div>
+          </div>
+        </div>
+      </div>
+
       <div id="bulkImportSection">
         <div class="section-title">Importação em massa de produtos</div>
         <div class="card">
@@ -1042,7 +1056,7 @@ const SEED_PRODUCTS = [
     "qty": 3
   }
 ];
-let state = { products: [], movements: [], tools: [], toolMovements: [], users: [] };
+let state = { products: [], movements: [], tools: [], toolMovements: [], users: [], presence: {}, loginLog: [] };
 let html5QrCode = null;
 let pendingProductId = null;
 let moveType = 'entrada';
@@ -1079,10 +1093,20 @@ function attachDbListeners(){
     state.users = objectToArrayWithIds(snap.val());
     renderUsers();
   });
+  db.ref('presence').on('value', snap=>{
+    state.presence = snap.val() || {};
+    renderUserActivity();
+  });
+  db.ref('loginLog').on('value', snap=>{
+    state.loginLog = objectToArrayWithIds(snap.val());
+    renderUserActivity();
+  });
   db.ref('.info/connected').on('value', snap=>{
     renderSyncStatus(!!snap.val());
   });
 }
+
+setInterval(function(){ renderUserActivity(); }, 30000);
 
 /* ---------- ABRIR DIRETO PELO LINK DO QR (câmera nativa do celular) ---------- */
 
@@ -1585,10 +1609,12 @@ function applyPermissions(){
   const backupSection = document.getElementById('backupManageSection');
   const bulkImportSection = document.getElementById('bulkImportSection');
   const duplicatesSection = document.getElementById('duplicatesSection');
+  const userActivitySection = document.getElementById('userActivitySection');
   if(usersSection) usersSection.style.display = manage ? 'block' : 'none';
   if(backupSection) backupSection.style.display = manage ? 'block' : 'none';
   if(bulkImportSection) bulkImportSection.style.display = manage ? 'block' : 'none';
   if(duplicatesSection) duplicatesSection.style.display = manage ? 'block' : 'none';
+  if(userActivitySection) userActivitySection.style.display = manage ? 'block' : 'none';
 
   const navBtn = document.getElementById('navGestaoBtn');
   if(navBtn) navBtn.style.display = manage ? 'flex' : 'none';
@@ -1639,6 +1665,69 @@ function addUser(){
   if(wasEmpty && isAdmin){
     setCurrentUser({ id, name });
     showToast('Você entrou como ' + name + ' (administrador).');
+  }
+}
+
+/* ---------- ATIVIDADE DA EQUIPE (quem está online, histórico de login) ---------- */
+
+function relativeTime(ms){
+  if(!ms) return 'nunca';
+  const diff = Date.now() - ms;
+  const min = Math.floor(diff / 60000);
+  if(min < 1) return 'agora mesmo';
+  if(min < 60) return 'há ' + min + ' min';
+  const hr = Math.floor(min / 60);
+  if(hr < 24) return 'há ' + hr + 'h';
+  const days = Math.floor(hr / 24);
+  return 'há ' + days + ' dia' + (days > 1 ? 's' : '');
+}
+
+function renderUserActivity(){
+  const statusEl = document.getElementById('userActivityResult');
+  if(statusEl){
+    const usersSorted = state.users.slice().sort((a,b)=>a.name.localeCompare(b.name,'pt-BR'));
+    let html = '';
+    if(usersSorted.length === 0){
+      html = '<p class="scan-hint" style="margin-bottom:0;">Nenhum usuário cadastrado ainda.</p>';
+    } else {
+      usersSorted.forEach(u=>{
+        const pres = state.presence[u.id];
+        let statusHtml;
+        if(pres && pres.online){
+          statusHtml = '<span style="color:var(--glass-dark);font-weight:700;">🟢 Online agora</span>';
+        } else if(pres && pres.lastSeen){
+          statusHtml = '<span style="color:var(--ink-soft);">⚪ Visto ' + relativeTime(pres.lastSeen) + '</span>';
+        } else {
+          statusHtml = '<span style="color:var(--ink-soft);">⚪ Nunca entrou</span>';
+        }
+        const adminTag = u.isAdmin ? ' <span style="color:var(--glass-dark);font-size:11px;font-weight:700;">· admin</span>' : '';
+        html += '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--line);">' +
+          '<span style="font-weight:600;font-size:13px;">' + escapeHtml(u.name) + adminTag + '</span>' +
+          '<span style="font-size:12px;">' + statusHtml + '</span></div>';
+      });
+    }
+    statusEl.innerHTML = html;
+  }
+
+  const logList = document.getElementById('loginLogList');
+  const logEmpty = document.getElementById('loginLogEmpty');
+  if(logList){
+    logList.querySelectorAll('.hist-row').forEach(n=>n.remove());
+    const entries = state.loginLog.slice().reverse().slice(0, 100);
+    if(entries.length === 0){
+      if(logEmpty) logEmpty.style.display = 'block';
+    } else {
+      if(logEmpty) logEmpty.style.display = 'none';
+      entries.forEach(entry=>{
+        const d = new Date(entry.ts);
+        const dateStr = d.toLocaleDateString('pt-BR') + ' ' + d.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});
+        const row = document.createElement('div');
+        row.className = 'hist-row';
+        row.innerHTML = '<div class="hist-top"><span>' + escapeHtml(entry.userName) + '</span><span class="hist-type entrada">Login</span></div>' +
+          '<div class="hist-meta">' + dateStr + '</div>';
+        logList.appendChild(row);
+      });
+    }
   }
 }
 
@@ -3215,8 +3304,7 @@ function submitLock(){
       // primeiro acesso: ninguém cadastrado ainda -> quem entrar primeiro vira administrador
       const id = db.ref('users').push().key;
       return db.ref('users/' + id).set({ name, pin: pass, isAdmin: true }).then(()=>{
-        setCurrentUser({ id, name });
-        unlockApp();
+        onSuccessfulLogin(id, name);
       });
     }
 
@@ -3225,8 +3313,7 @@ function submitLock(){
     );
 
     if(match){
-      setCurrentUser({ id: match.id, name: match.name });
-      unlockApp();
+      onSuccessfulLogin(match.id, match.name);
     } else {
       errorEl.textContent = 'Nome ou senha incorretos.';
       document.getElementById('lockInput').value = '';
@@ -3240,9 +3327,39 @@ function submitLock(){
   });
 }
 
+function onSuccessfulLogin(id, name){
+  setCurrentUser({ id, name });
+  db.ref('loginLog').push({ userId: id, userName: name, ts: new Date().toISOString() });
+  setupPresence(id, name);
+  unlockApp();
+}
+
+/* ---------- PRESENÇA (quem está online agora) ---------- */
+
+function setupPresence(userId, userName){
+  const presenceRef = db.ref('presence/' + userId);
+  db.ref('.info/connected').on('value', snap=>{
+    if(snap.val() === true){
+      presenceRef.onDisconnect().update({
+        online: false, lastSeen: firebase.database.ServerValue.TIMESTAMP, name: userName
+      }).then(()=>{
+        presenceRef.update({
+          online: true, lastSeen: firebase.database.ServerValue.TIMESTAMP, name: userName
+        });
+      });
+    }
+  });
+}
+
 function logoutCurrentUser(){
   const ok = confirm('Sair da conta atual e voltar para a tela de login?');
   if(!ok) return;
+  const u = getCurrentUser();
+  if(u){
+    db.ref('presence/' + u.id).update({
+      online: false, lastSeen: firebase.database.ServerValue.TIMESTAMP, name: u.name
+    });
+  }
   localStorage.removeItem(CURRENT_USER_KEY);
   location.reload();
 }
