@@ -166,6 +166,13 @@
       break-inside:avoid;page-break-inside:avoid;}
     #printAllArea .print-name{font-size:11px;font-weight:700;margin-top:6px;color:#000;}
     #printAllArea .print-sku{font-size:10px;color:#555;}
+
+    #printAllArea .print-cell-large{width:100%;text-align:center;padding:40px 20px;}
+    #printAllArea .print-name-large{font-family:'Oswald',Impact,'Arial Narrow',sans-serif;
+      font-size:56px;font-weight:700;text-transform:uppercase;color:#000;
+      line-height:1.1;margin-bottom:36px;word-wrap:break-word;}
+    #printAllArea .print-code-large{font-family:'Oswald',Impact,'Arial Narrow',sans-serif;
+      font-size:48px;font-weight:700;color:#000;margin-top:36px;letter-spacing:1px;}
   }
 
   #lockScreen{position:fixed;inset:0;background:var(--paper);z-index:100;display:flex;
@@ -2272,8 +2279,11 @@ function renderQrModalForProduct(p){
       <div class="sku-line">${escapeHtml(p.sku)}</div>
       <div class="modal-actions">
         <button class="btn-outline" onclick="closeQrModal()">Fechar</button>
-        <button class="btn-outline" onclick="printSingleProductQr('${p.id}')">Imprimir</button>
         <button class="btn-primary" onclick="downloadQr('${escapeHtml(p.name)}')">Baixar</button>
+      </div>
+      <div class="modal-actions">
+        <button class="btn-outline" onclick="printSingleProductQr('${p.id}')">Imprimir etiqueta</button>
+        <button class="btn-outline" onclick="printLargeProductLabel('${p.id}')">Etiqueta grande (palete)</button>
       </div>
     </div>
   `;
@@ -2323,6 +2333,42 @@ function printSingleProductQr(id){
   });
 
   showToast('Preparando impressão...');
+  setTimeout(()=>{ window.print(); }, 300);
+}
+
+function printLargeProductLabel(id){
+  const p = state.products.find(x=>x.id===id);
+  if(!p) return;
+
+  const area = document.getElementById('printAllArea');
+  area.innerHTML = '';
+
+  const cell = document.createElement('div');
+  cell.className = 'print-cell-large';
+
+  const name = document.createElement('div');
+  name.className = 'print-name-large';
+  name.textContent = p.name;
+  cell.appendChild(name);
+
+  const qrHolder = document.createElement('div');
+  qrHolder.style.display = 'flex';
+  qrHolder.style.justifyContent = 'center';
+  cell.appendChild(qrHolder);
+
+  const code = document.createElement('div');
+  code.className = 'print-code-large';
+  code.textContent = 'COD: ' + p.sku;
+  cell.appendChild(code);
+
+  area.appendChild(cell);
+  new QRCode(qrHolder, {
+    text: buildProductQrUrl(p),
+    width: 280, height: 280,
+    colorDark: '#000000', colorLight: '#ffffff'
+  });
+
+  showToast('Preparando etiqueta grande...');
   setTimeout(()=>{ window.print(); }, 300);
 }
 
