@@ -508,6 +508,10 @@
         <div class="section-title">Importação em massa de produtos</div>
         <div class="card">
           <p class="scan-hint" style="margin-bottom:12px;">Importe uma lista de produtos de uma vez, a partir de um CSV com colunas <strong>Nome</strong>, <strong>Código</strong>, <strong>Categoria</strong> (opcional) e <strong>Quantidade</strong>. Produtos com código já cadastrado são atualizados (nome, categoria e quantidade); os demais são criados. Não mexe em ferramentas, histórico ou usuários.</p>
+          <label style="display:flex;align-items:flex-start;gap:8px;font-weight:600;font-size:12px;text-transform:none;letter-spacing:0;color:var(--ink);margin-bottom:12px;">
+            <input type="checkbox" id="bulkDeleteMissing" checked style="width:auto;margin:2px 0 0;">
+            <span>Excluir do site os produtos que não estão na planilha (o histórico de movimentações é mantido)</span>
+          </label>
           <input type="file" id="bulkImportFile" accept=".csv,text/csv" style="display:none;" onchange="handleBulkProductImport(this)">
           <button class="btn-outline" onclick="document.getElementById('bulkImportFile').click()">Importar produtos (CSV)</button>
           <div id="bulkImportResult" style="margin-top:12px;font-size:13px;"></div>
@@ -521,6 +525,23 @@
           <button class="btn-outline" onclick="findDuplicateProducts()">Buscar duplicados</button>
         </div>
         <div id="duplicatesResult"></div>
+      </div>
+
+      <div id="categoriesSection">
+        <div class="section-title">Categorias (filtros)</div>
+        <div class="card">
+          <p class="scan-hint" style="margin-bottom:12px;">Crie, renomeie ou exclua as categorias que aparecem no filtro e no cadastro de produtos. Renomear atualiza todos os produtos daquela categoria.</p>
+          <label for="newCategoryInput">Nova categoria</label>
+          <input type="text" id="newCategoryInput" placeholder="Ex: Calhas e Rufos">
+          <button class="btn-primary" onclick="addCategory()">Criar categoria</button>
+        </div>
+        <div class="card" id="categoryList" style="padding:4px 12px;">
+          <div class="empty" id="categoryEmpty">
+            <div class="mark"></div>
+            <div class="empty-title">Nenhuma categoria ainda</div>
+            <div class="empty-sub">Crie a primeira categoria acima.</div>
+          </div>
+        </div>
       </div>
 
       <div id="backupManageSection">
@@ -1063,7 +1084,7 @@ const SEED_PRODUCTS = [
     "qty": 3
   }
 ];
-let state = { products: [], movements: [], tools: [], toolMovements: [], users: [], presence: {}, loginLog: [] };
+let state = { products: [], movements: [], tools: [], toolMovements: [], users: [], presence: {}, loginLog: [], categories: [] };
 let html5QrCode = null;
 let pendingProductId = null;
 let moveType = 'entrada';
@@ -1082,6 +1103,12 @@ function attachDbListeners(){
     updateHeaderSub();
     tryHandlePendingDeepLink();
     renderDuplicatesPanel();
+    renderCategories();
+  });
+  db.ref('categories').on('value', snap=>{
+    state.categories = objectToArrayWithIds(snap.val());
+    renderProducts();
+    renderCategories();
   });
   db.ref('movements').on('value', snap=>{
     state.movements = objectToArrayWithIds(snap.val());
@@ -1389,6 +1416,123 @@ function normalizeHeader(s){
   return String(s).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
 }
 
+/* ---------- CATEGORIAS (criar, renomear, excluir) ---------- */
+
+let categoryRowsCache = [];
+
+function renderCategories(){
+  const list = document.getElementById('categoryList');
+  const empty = document.getElementById('categoryEmpty');
+  if(!list || !empty) return;
+  list.querySelectorAll('.product-row').forEach(n=>n.remove());
+
+  categoryRowsCache = getAllCategories();
+  if(categoryRowsCache.length === 0){ empty.style.display = 'block'; return; }
+  empty.style.display = 'none';
+
+  const counts = {};
+  state.products.forEach(p => {
+    const k = (p.category || '').trim().toLowerCase();
+    if(k) counts[k] = (counts[k] || 0) + 1;
+  });
+
+  categoryRowsCache.forEach((name, i) => {
+    const n = counts[name.toLowerCase()] || 0;
+    const row = document.createElement('div');
+    row.className = 'product-row';
+    row.innerHTML = `
+      <div class="product-info">
+        <div class="product-name">${escapeHtml(name)}</div>
+        <div class="product-sku">${n} produto(s)</div>
+        <div class="row-actions">
+          <button class="icon-btn" onclick="renameCategory(${i})">Renomear</button>
+          <button class="icon-btn" onclick="deleteCategory(${i})">Excluir</button>
+        </div>
+      </div>
+    `;
+    list.appendChild(row);
+  });
+}
+
+function addCategory(){
+  if(!canManage()){ showToast('Apenas administradores podem criar categorias.'); return; }
+  const el = document.getElementById('newCategoryInput');
+  const name = el.value.trim();
+  if(!name){ showToast('Digite o nome da categoria.'); el.focus(); return; }
+  if(getAllCategories().some(c => c.toLowerCase() === name.toLowerCase())){
+    showToast('Essa categoria já existe.');
+    return;
+  }
+  const id = db.ref('categories').push().key;
+  db.ref('categories/' + id).set({ name }).catch(()=>{
+    showToast('Erro ao salvar na nuvem. Verifique sua internet.');
+  });
+  el.value = '';
+  showToast('Categoria "' + name + '" criada.');
+}
+
+function renameCategory(i){
+  if(!canManage()){ showToast('Apenas administradores podem renomear categorias.'); return; }
+  const old = categoryRowsCache[i];
+  if(old === undefined) return;
+  const input = prompt('Novo nome para a categoria "' + old + '":', old);
+  if(input === null) return;
+  const name = input.trim();
+  if(!name){ showToast('Digite um nome.'); return; }
+  if(name === old) return;
+
+  const oldL = old.toLowerCase(), newL = name.toLowerCase();
+  const existsOther = oldL !== newL && getAllCategories().some(c => c.toLowerCase() === newL);
+  if(existsOther && !confirm('Já existe a categoria "' + name + '". Juntar "' + old + '" nela?')) return;
+
+  const updates = {};
+  let count = 0;
+  state.products.forEach(p => {
+    if((p.category || '').trim().toLowerCase() === oldL){
+      updates['products/' + p.id + '/category'] = name;
+      count++;
+    }
+  });
+  state.categories.forEach(c => {
+    if((c.name || '').trim().toLowerCase() === oldL){
+      if(existsOther) updates['categories/' + c.id] = null;
+      else updates['categories/' + c.id + '/name'] = name;
+    }
+  });
+  if(Object.keys(updates).length === 0) return;
+
+  db.ref().update(updates).then(()=>{
+    showToast('Categoria renomeada para "' + name + '" (' + count + ' produto(s) atualizado(s)).');
+  }).catch(()=>{
+    showToast('Erro ao salvar na nuvem. Verifique sua internet.');
+  });
+}
+
+function deleteCategory(i){
+  if(!canManage()){ showToast('Apenas administradores podem excluir categorias.'); return; }
+  const name = categoryRowsCache[i];
+  if(name === undefined) return;
+  const lower = name.toLowerCase();
+  const affected = state.products.filter(p => (p.category || '').trim().toLowerCase() === lower);
+  const msg = affected.length > 0
+    ? 'Excluir a categoria "' + name + '"? Os ' + affected.length + ' produto(s) dela ficarão SEM categoria (nenhum produto é apagado).'
+    : 'Excluir a categoria "' + name + '"?';
+  if(!confirm(msg)) return;
+
+  const updates = {};
+  affected.forEach(p => { updates['products/' + p.id + '/category'] = ''; });
+  state.categories.forEach(c => {
+    if((c.name || '').trim().toLowerCase() === lower) updates['categories/' + c.id] = null;
+  });
+  if(Object.keys(updates).length === 0) return;
+
+  db.ref().update(updates).then(()=>{
+    showToast('Categoria "' + name + '" excluída.');
+  }).catch(()=>{
+    showToast('Erro ao salvar na nuvem. Verifique sua internet.');
+  });
+}
+
 /* ---------- PRODUTOS DUPLICADOS ---------- */
 
 let duplicatesPanelVisible = false;
@@ -1484,8 +1628,9 @@ function handleBulkProductImport(input){
         input.value = ''; return;
       }
 
-      let created = 0, updated = 0, skipped = 0;
+      let created = 0, updated = 0, skipped = 0, removed = 0;
       const updates = {};
+      const sheetSkus = new Set();
 
       for(let i = 1; i < lines.length; i++){
         const cols = lines[i].split(sep);
@@ -1496,6 +1641,7 @@ function handleBulkProductImport(input){
         const qty = qtyRaw ? Math.max(0, Math.round(parseFloat(qtyRaw)) || 0) : 0;
 
         if(!name || !sku){ skipped++; continue; }
+        sheetSkus.add(sku.toLowerCase());
 
         const existing = state.products.find(p => p.sku.toLowerCase() === sku.toLowerCase());
         if(existing){
@@ -1515,10 +1661,24 @@ function handleBulkProductImport(input){
         input.value = ''; return;
       }
 
+      const deleteMissingEl = document.getElementById('bulkDeleteMissing');
+      if(deleteMissingEl && deleteMissingEl.checked){
+        const toRemove = state.products.filter(p => !sheetSkus.has(String(p.sku).toLowerCase()));
+        if(toRemove.length > 0){
+          const sample = toRemove.slice(0, 10).map(p => '• ' + p.name).join('\n');
+          const more = toRemove.length > 10 ? '\n... e mais ' + (toRemove.length - 10) + ' produto(s)' : '';
+          const ok = confirm(toRemove.length + ' produto(s) do site NÃO estão na planilha e serão EXCLUÍDOS:\n\n' + sample + more + '\n\nContinuar com a importação e a exclusão? (Cancelar não altera nada.)');
+          if(!ok){ input.value = ''; return; }
+          toRemove.forEach(p => { updates['products/' + p.id] = null; });
+          removed = toRemove.length;
+        }
+      }
+
       db.ref().update(updates).then(()=>{
         resultEl.innerHTML = '<strong>' + created + '</strong> produto(s) criado(s), <strong>' + updated + '</strong> atualizado(s)' +
+          (removed > 0 ? ', <strong>' + removed + '</strong> excluído(s) por não estarem na planilha' : '') +
           (skipped > 0 ? ', ' + skipped + ' linha(s) ignorada(s) por dados incompletos.' : '.');
-        showToast('Importação concluída: ' + created + ' criado(s), ' + updated + ' atualizado(s).');
+        showToast('Importação concluída: ' + created + ' criado(s), ' + updated + ' atualizado(s), ' + removed + ' excluído(s).');
       }).catch(()=>{
         showToast('Erro ao salvar na nuvem. Verifique sua internet.');
       });
@@ -1557,7 +1717,8 @@ function importBackupFile(input){
         movements: toMap(data.movements),
         tools: toMap(data.tools),
         toolMovements: toMap(data.toolMovements),
-        users: toMap(data.users)
+        users: toMap(data.users),
+        categories: toMap(data.categories)
       };
 
       db.ref().set(newData).then(()=>{
@@ -1621,6 +1782,8 @@ function applyPermissions(){
   if(backupSection) backupSection.style.display = manage ? 'block' : 'none';
   if(bulkImportSection) bulkImportSection.style.display = manage ? 'block' : 'none';
   if(duplicatesSection) duplicatesSection.style.display = manage ? 'block' : 'none';
+  const categoriesSection = document.getElementById('categoriesSection');
+  if(categoriesSection) categoriesSection.style.display = manage ? 'block' : 'none';
   if(userActivitySection) userActivitySection.style.display = manage ? 'block' : 'none';
 
   const navBtn = document.getElementById('navGestaoBtn');
@@ -2003,10 +2166,21 @@ function isLowStock(p){
   return p.qty <= 0 || (p.minStock > 0 && p.qty <= p.minStock);
 }
 
+function getAllCategories(){
+  const map = new Map();
+  state.categories.forEach(c => {
+    const n = (c.name || '').trim();
+    if(n && !map.has(n.toLowerCase())) map.set(n.toLowerCase(), n);
+  });
+  state.products.forEach(p => {
+    const n = (p.category || '').trim();
+    if(n && !map.has(n.toLowerCase())) map.set(n.toLowerCase(), n);
+  });
+  return Array.from(map.values()).sort((a,b)=>a.localeCompare(b,'pt-BR'));
+}
+
 function populateCategoryOptions(){
-  const categories = Array.from(new Set(
-    state.products.map(p => (p.category || '').trim()).filter(Boolean)
-  )).sort((a,b)=>a.localeCompare(b,'pt-BR'));
+  const categories = getAllCategories();
 
   const filterEl = document.getElementById('productCategoryFilter');
   if(filterEl){
@@ -2042,7 +2216,7 @@ function getFilteredProducts(){
     );
   }
   if(categoryFilter){
-    items = items.filter(p => (p.category || '').trim() === categoryFilter);
+    items = items.filter(p => (p.category || '').trim().toLowerCase() === categoryFilter.toLowerCase());
   }
   if(lowStockOnly){
     items = items.filter(isLowStock);
