@@ -116,7 +116,7 @@
 
   .qr-modal-bg{position:fixed;inset:0;background:rgba(35,31,27,0.72);z-index:50;
     display:flex;align-items:center;justify-content:center;padding:20px;}
-  .qr-modal{background:#fff;border-radius:4px;padding:24px;max-width:320px;width:100%;text-align:center;}
+  .qr-modal{background:#fff;border-radius:4px;padding:24px;max-width:320px;width:100%;text-align:center;max-height:92vh;overflow-y:auto;}
   .qr-modal .stamp{border:3px double var(--ink);padding:16px;margin-bottom:14px;}
   .qr-modal h3{font-family:'Oswald',sans-serif;text-transform:uppercase;margin:10px 0 2px;font-size:16px;}
   .qr-modal .sku-line{font-size:11px;color:var(--ink-soft);letter-spacing:1px;margin-bottom:14px;}
@@ -286,6 +286,10 @@
           <div class="empty-sub">Cadastre o primeiro produto acima. Um QR Code será gerado para colar na caixa ou palete.</div>
         </div>
       </div>
+      <div class="card" style="margin-top:10px;">
+        <div style="font-weight:700;font-size:14px;">Etiqueta de impressão</div>
+        <div id="labelControlsProducts"></div>
+      </div>
       <button class="btn-outline" style="margin-top:10px;" onclick="printAllQrCodes()">Imprimir QR (produtos filtrados)</button>
 
       <div class="section-title">Relatórios</div>
@@ -420,6 +424,10 @@
           <div class="empty-title">Nenhuma ferramenta ainda</div>
           <div class="empty-sub">Cadastre a primeira ferramenta acima. Um QR Code será gerado para colar nela.</div>
         </div>
+      </div>
+      <div class="card" style="margin-top:10px;">
+        <div style="font-weight:700;font-size:14px;">Etiqueta de impressão</div>
+        <div id="labelControlsTools"></div>
       </div>
       <button class="btn-outline" style="margin-top:10px;" onclick="printAllToolQrCodes()">Imprimir QR (ferramentas filtradas)</button>
 
@@ -831,44 +839,9 @@ function exportMovementsCsv(){
 
 function printAllQrCodes(){
   if(state.products.length === 0){ showToast('Nenhum produto cadastrado ainda.'); return; }
-
   const items = getFilteredProducts();
   if(items.length === 0){ showToast('Nenhum produto corresponde aos filtros atuais.'); return; }
-
-  const isFiltered = items.length !== state.products.length;
-
-  const area = document.getElementById('printAllArea');
-  area.innerHTML = '';
-
-  const grid = document.createElement('div');
-  grid.style.display = 'grid';
-  grid.style.gridTemplateColumns = 'repeat(3, 1fr)';
-  grid.style.gap = '14px';
-
-  items.forEach(p=>{
-    const cell = document.createElement('div');
-    cell.className = 'print-cell';
-    const qrHolder = document.createElement('div');
-    cell.appendChild(qrHolder);
-    const name = document.createElement('div');
-    name.className = 'print-name';
-    name.textContent = p.name;
-    const sku = document.createElement('div');
-    sku.className = 'print-sku';
-    sku.textContent = p.sku;
-    cell.appendChild(name);
-    cell.appendChild(sku);
-    grid.appendChild(cell);
-    new QRCode(qrHolder, {
-      text: buildProductQrUrl(p),
-      width: 110, height: 110,
-      colorDark: '#000000', colorLight: '#ffffff'
-    });
-  });
-
-  area.appendChild(grid);
-  showToast('Preparando impressão de ' + items.length + ' etiqueta(s)' + (isFiltered ? ' (filtro atual)' : '') + '...');
-  setTimeout(()=>{ window.print(); }, 350);
+  printLabels(items.map(p => ({ name: p.name, code: p.sku, url: buildProductQrUrl(p) })));
 }
 
 window.addEventListener('afterprint', function(){
@@ -1055,6 +1028,181 @@ function deleteCategory(i){
   }).catch(()=>{
     showToast('Erro ao salvar na nuvem. Verifique sua internet.');
   });
+}
+
+/* ---------- EDITOR DE ETIQUETAS (tamanho do QR, nome e código) ---------- */
+
+const LABEL_PREFS_KEY = 'estoque-qr-label-prefs';
+const LABEL_PRESETS = [
+  { cm: 3,  label: 'Pequena — QR 3 cm (caixas)' },
+  { cm: 6,  label: 'Média — QR 6 cm (prateleira)' },
+  { cm: 12, label: 'Grande — QR 12 cm (palete)' },
+  { cm: 17, label: 'Pátio — QR 17 cm (página inteira)' }
+];
+let currentModalQrUrl = '';
+let currentToolModalQrUrl = '';
+
+function getLabelPrefs(){
+  let p = {};
+  try{ p = JSON.parse(localStorage.getItem(LABEL_PREFS_KEY) || '{}'); }catch(e){}
+  const size = parseFloat(p.sizeCm);
+  return {
+    sizeCm: (size >= 2 && size <= 18) ? size : 6,
+    showName: p.showName !== false,
+    showCode: p.showCode !== false
+  };
+}
+
+function saveLabelPrefs(prefs){
+  try{ localStorage.setItem(LABEL_PREFS_KEY, JSON.stringify(prefs)); }catch(e){}
+}
+
+function labelControlsHtml(){
+  const selStyle = 'width:100%;padding:11px 10px;border:1.5px solid var(--ink);border-radius:3px;font-size:14px;background:#fff;color:var(--ink);margin-bottom:8px;font-family:inherit;';
+  const ckStyle = 'display:flex;align-items:center;gap:8px;font-weight:600;font-size:12px;text-transform:none;letter-spacing:0;color:var(--ink);margin-bottom:6px;';
+  return `<div class="lbl-box" style="text-align:left;margin-top:12px;">
+    <label style="margin-bottom:4px;">Tamanho da etiqueta</label>
+    <select data-lbl="preset" onchange="labelCtl('preset', this)" style="${selStyle}">
+      ${LABEL_PRESETS.map(x => `<option value="${x.cm}">${x.label}</option>`).join('')}
+      <option value="custom">Personalizado</option>
+    </select>
+    <label style="margin-bottom:4px;">Tamanho do QR (cm) — de 2 a 18</label>
+    <input type="number" data-lbl="size" min="2" max="18" step="0.5" onchange="labelCtl('size', this)" style="margin-bottom:8px;">
+    <label style="${ckStyle}"><input type="checkbox" data-lbl="name" onchange="labelCtl('name', this)" style="width:auto;margin:0;"> Mostrar o nome</label>
+    <label style="${ckStyle}"><input type="checkbox" data-lbl="code" onchange="labelCtl('code', this)" style="width:auto;margin:0;"> Mostrar o código</label>
+    <div data-lbl="hint" style="font-size:11.5px;color:var(--ink-soft);margin-top:4px;line-height:1.4;"></div>
+  </div>`;
+}
+
+function renderLabelControls(containerId){
+  const el = document.getElementById(containerId);
+  if(!el) return;
+  el.innerHTML = labelControlsHtml();
+  syncLabelControls();
+}
+
+function syncLabelControls(){
+  const prefs = getLabelPrefs();
+  const preset = LABEL_PRESETS.find(x => x.cm === prefs.sizeCm);
+  const onePerPage = prefs.sizeCm >= 10;
+  const perLine = Math.max(1, Math.floor(19 / (prefs.sizeCm + 0.8)));
+  const hint = onePerPage
+    ? 'Uma etiqueta por página A4, com letras grandes para ler de longe.'
+    : 'Cabem cerca de ' + perLine + ' etiqueta(s) por linha em uma folha A4.';
+  document.querySelectorAll('.lbl-box').forEach(box=>{
+    box.querySelector('[data-lbl="preset"]').value = preset ? String(preset.cm) : 'custom';
+    box.querySelector('[data-lbl="size"]').value = prefs.sizeCm;
+    box.querySelector('[data-lbl="name"]').checked = prefs.showName;
+    box.querySelector('[data-lbl="code"]').checked = prefs.showCode;
+    box.querySelector('[data-lbl="hint"]').textContent = hint;
+  });
+}
+
+function labelCtl(field, el){
+  const prefs = getLabelPrefs();
+  if(field === 'preset'){
+    if(el.value === 'custom') return;
+    prefs.sizeCm = parseFloat(el.value);
+  } else if(field === 'size'){
+    const v = parseFloat(el.value);
+    if(isNaN(v)){ syncLabelControls(); return; }
+    prefs.sizeCm = Math.min(18, Math.max(2, v));
+  } else if(field === 'name'){
+    prefs.showName = el.checked;
+  } else if(field === 'code'){
+    prefs.showCode = el.checked;
+  }
+  saveLabelPrefs(prefs);
+  syncLabelControls();
+}
+
+/* Gera as etiquetas no tamanho escolhido e abre a impressão.
+   Acima de 10 cm: uma etiqueta por página. Abaixo: várias por folha. */
+function printLabels(items){
+  const prefs = getLabelPrefs();
+  const qrCm = prefs.sizeCm;
+  const onePerPage = qrCm >= 10;
+  if(onePerPage && items.length > 20 &&
+     !confirm('Com esse tamanho serão ' + items.length + ' páginas (uma etiqueta por página). Continuar?')) return;
+
+  const area = document.getElementById('printAllArea');
+  area.innerHTML = '';
+
+  const wrap = document.createElement('div');
+  if(!onePerPage){
+    wrap.style.display = 'grid';
+    wrap.style.gridTemplateColumns = 'repeat(auto-fill, minmax(' + (qrCm + 0.8) + 'cm, 1fr))';
+    wrap.style.gap = '0.4cm';
+  }
+
+  const qrPx = onePerPage ? 800 : 400;
+  const nameBase = Math.min(64, Math.max(10, qrCm * 3.6));
+  const bigFont = "font-family:'Oswald',Impact,'Arial Narrow',sans-serif;text-transform:uppercase;";
+
+  items.forEach((it, idx) => {
+    const cell = document.createElement('div');
+    cell.style.textAlign = 'center';
+    cell.style.boxSizing = 'border-box';
+    cell.style.breakInside = 'avoid';
+    cell.style.pageBreakInside = 'avoid';
+    if(onePerPage){
+      cell.style.padding = '0.8cm 0.4cm';
+      if(idx < items.length - 1){ cell.style.pageBreakAfter = 'always'; cell.style.breakAfter = 'page'; }
+    } else {
+      cell.style.border = '1px solid #999';
+      cell.style.padding = '0.25cm';
+    }
+
+    if(prefs.showName){
+      const f = it.name.length > 45 ? nameBase * 0.75 : (it.name.length > 30 ? nameBase * 0.9 : nameBase);
+      const nameEl = document.createElement('div');
+      nameEl.textContent = it.name;
+      nameEl.style.cssText = 'font-weight:700;color:#000;line-height:1.1;word-wrap:break-word;font-size:' + f + 'px;' +
+        'margin-bottom:' + (onePerPage ? '0.8cm' : '0.15cm') + ';' + (onePerPage ? bigFont : '');
+      cell.appendChild(nameEl);
+    }
+
+    const holder = document.createElement('div');
+    holder.style.cssText = 'display:flex;justify-content:center;';
+    cell.appendChild(holder);
+    new QRCode(holder, { text: it.url, width: qrPx, height: qrPx, colorDark: '#000000', colorLight: '#ffffff' });
+    holder.querySelectorAll('img, canvas').forEach(n => { n.style.width = qrCm + 'cm'; n.style.height = qrCm + 'cm'; });
+
+    if(prefs.showCode){
+      const codeEl = document.createElement('div');
+      codeEl.textContent = (onePerPage ? 'COD: ' : '') + it.code;
+      codeEl.style.cssText = 'font-weight:700;color:' + (onePerPage ? '#000' : '#444') + ';font-size:' + Math.max(9, nameBase * 0.85) + 'px;' +
+        'margin-top:' + (onePerPage ? '0.8cm' : '0.1cm') + ';' + (onePerPage ? bigFont : '');
+      cell.appendChild(codeEl);
+    }
+
+    wrap.appendChild(cell);
+  });
+
+  area.appendChild(wrap);
+  showToast('Preparando impressão de ' + items.length + ' etiqueta(s)...');
+  setTimeout(()=>{ window.print(); }, 450);
+}
+
+/* PNG em alta resolução (1200 px + margem branca), bom para ampliar */
+function downloadQrPng(url, filename){
+  if(!url) return;
+  const tmp = document.createElement('div');
+  new QRCode(tmp, { text: url, width: 1200, height: 1200, colorDark: '#000000', colorLight: '#ffffff' });
+  const src = tmp.querySelector('canvas');
+  if(!src) return;
+  const margin = 80;
+  const out = document.createElement('canvas');
+  out.width = src.width + margin * 2;
+  out.height = src.height + margin * 2;
+  const ctx = out.getContext('2d');
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, out.width, out.height);
+  ctx.drawImage(src, margin, margin);
+  const link = document.createElement('a');
+  link.download = filename;
+  link.href = out.toDataURL('image/png');
+  link.click();
 }
 
 /* ---------- PRODUTOS DUPLICADOS ---------- */
@@ -1977,15 +2125,15 @@ function renderQrModalForProduct(p){
       <div class="sku-line">${escapeHtml(p.sku)}</div>
       <div class="modal-actions">
         <button class="btn-outline" onclick="closeQrModal()">Fechar</button>
-        <button class="btn-primary" onclick="downloadQr('${escapeHtml(p.name)}')">Baixar</button>
+        <button class="btn-outline" onclick="downloadQr('${escapeHtml(p.name)}')">Baixar PNG</button>
       </div>
-      <div class="modal-actions">
-        <button class="btn-outline" onclick="printSingleProductQr('${p.id}')">Imprimir etiqueta</button>
-        <button class="btn-outline" onclick="printLargeProductLabel('${p.id}')">Etiqueta grande (palete)</button>
-      </div>
+      <div id="labelControlsModal"></div>
+      <button class="btn-primary" style="width:100%;margin-top:10px;" onclick="printSingleProductQr('${p.id}')">Imprimir etiqueta</button>
     </div>
   `;
   document.body.appendChild(bg);
+  currentModalQrUrl = buildProductQrUrl(p);
+  renderLabelControls('labelControlsModal');
   new QRCode(document.getElementById('qrcodeCanvas'), {
     text: buildProductQrUrl(p),
     width: 180, height: 180,
@@ -2001,82 +2149,12 @@ function closeQrModal(){
 function printSingleProductQr(id){
   const p = state.products.find(x=>x.id===id);
   if(!p) return;
-
-  const area = document.getElementById('printAllArea');
-  area.innerHTML = '';
-
-  const grid = document.createElement('div');
-  grid.style.maxWidth = '240px';
-  grid.style.margin = '0 auto';
-
-  const cell = document.createElement('div');
-  cell.className = 'print-cell';
-  const qrHolder = document.createElement('div');
-  cell.appendChild(qrHolder);
-  const name = document.createElement('div');
-  name.className = 'print-name';
-  name.textContent = p.name;
-  const sku = document.createElement('div');
-  sku.className = 'print-sku';
-  sku.textContent = p.sku;
-  cell.appendChild(name);
-  cell.appendChild(sku);
-  grid.appendChild(cell);
-
-  area.appendChild(grid);
-  new QRCode(qrHolder, {
-    text: buildProductQrUrl(p),
-    width: 180, height: 180,
-    colorDark: '#000000', colorLight: '#ffffff'
-  });
-
-  showToast('Preparando impressão...');
-  setTimeout(()=>{ window.print(); }, 300);
+  printLabels([{ name: p.name, code: p.sku, url: buildProductQrUrl(p) }]);
 }
 
-function printLargeProductLabel(id){
-  const p = state.products.find(x=>x.id===id);
-  if(!p) return;
-
-  const area = document.getElementById('printAllArea');
-  area.innerHTML = '';
-
-  const cell = document.createElement('div');
-  cell.className = 'print-cell-large';
-
-  const name = document.createElement('div');
-  name.className = 'print-name-large';
-  name.textContent = p.name;
-  cell.appendChild(name);
-
-  const qrHolder = document.createElement('div');
-  qrHolder.style.display = 'flex';
-  qrHolder.style.justifyContent = 'center';
-  cell.appendChild(qrHolder);
-
-  const code = document.createElement('div');
-  code.className = 'print-code-large';
-  code.textContent = 'COD: ' + p.sku;
-  cell.appendChild(code);
-
-  area.appendChild(cell);
-  new QRCode(qrHolder, {
-    text: buildProductQrUrl(p),
-    width: 280, height: 280,
-    colorDark: '#000000', colorLight: '#ffffff'
-  });
-
-  showToast('Preparando etiqueta grande...');
-  setTimeout(()=>{ window.print(); }, 300);
-}
 
 function downloadQr(name){
-  const canvas = document.querySelector('#qrcodeCanvas canvas');
-  if(!canvas) return;
-  const link = document.createElement('a');
-  link.download = 'qr-' + name.replace(/[^a-z0-9]+/gi,'-').toLowerCase() + '.png';
-  link.href = canvas.toDataURL('image/png');
-  link.click();
+  downloadQrPng(currentModalQrUrl, 'qr-' + name.replace(/[^a-z0-9]+/gi,'-').toLowerCase() + '.png');
 }
 
 /* ---------- SCANNER ---------- */
@@ -2597,12 +2675,15 @@ function renderToolQrModalForTool(t){
       <div class="sku-line">${escapeHtml(t.code)}</div>
       <div class="modal-actions">
         <button class="btn-outline" onclick="closeToolQrModal()">Fechar</button>
-        <button class="btn-outline" onclick="printSingleToolQr('${t.id}')">Imprimir</button>
-        <button class="btn-primary" onclick="downloadToolQr('${escapeHtml(t.name)}')">Baixar</button>
+        <button class="btn-outline" onclick="downloadToolQr('${escapeHtml(t.name)}')">Baixar PNG</button>
       </div>
+      <div id="labelControlsToolModal"></div>
+      <button class="btn-primary" style="width:100%;margin-top:10px;" onclick="printSingleToolQr('${t.id}')">Imprimir etiqueta</button>
     </div>
   `;
   document.body.appendChild(bg);
+  currentToolModalQrUrl = buildToolQrUrl(t);
+  renderLabelControls('labelControlsToolModal');
   new QRCode(document.getElementById('toolQrcodeCanvas'), {
     text: buildToolQrUrl(t),
     width: 180, height: 180,
@@ -2618,46 +2699,11 @@ function closeToolQrModal(){
 function printSingleToolQr(id){
   const t = state.tools.find(x=>x.id===id);
   if(!t) return;
-
-  const area = document.getElementById('printAllArea');
-  area.innerHTML = '';
-
-  const grid = document.createElement('div');
-  grid.style.maxWidth = '240px';
-  grid.style.margin = '0 auto';
-
-  const cell = document.createElement('div');
-  cell.className = 'print-cell';
-  const qrHolder = document.createElement('div');
-  cell.appendChild(qrHolder);
-  const name = document.createElement('div');
-  name.className = 'print-name';
-  name.textContent = t.name;
-  const code = document.createElement('div');
-  code.className = 'print-sku';
-  code.textContent = t.code;
-  cell.appendChild(name);
-  cell.appendChild(code);
-  grid.appendChild(cell);
-
-  area.appendChild(grid);
-  new QRCode(qrHolder, {
-    text: buildToolQrUrl(t),
-    width: 180, height: 180,
-    colorDark: '#000000', colorLight: '#ffffff'
-  });
-
-  showToast('Preparando impressão...');
-  setTimeout(()=>{ window.print(); }, 300);
+  printLabels([{ name: t.name, code: t.code, url: buildToolQrUrl(t) }]);
 }
 
 function downloadToolQr(name){
-  const canvas = document.querySelector('#toolQrcodeCanvas canvas');
-  if(!canvas) return;
-  const link = document.createElement('a');
-  link.download = 'qr-ferramenta-' + name.replace(/[^a-z0-9]+/gi,'-').toLowerCase() + '.png';
-  link.href = canvas.toDataURL('image/png');
-  link.click();
+  downloadQrPng(currentToolModalQrUrl, 'qr-ferramenta-' + name.replace(/[^a-z0-9]+/gi,'-').toLowerCase() + '.png');
 }
 
 /* Scanner de ferramentas (câmera própria, separada da de produtos) */
@@ -2797,44 +2843,9 @@ function confirmToolReturn(){
 
 function printAllToolQrCodes(){
   if(state.tools.length === 0){ showToast('Nenhuma ferramenta cadastrada ainda.'); return; }
-
   const items = getFilteredTools();
   if(items.length === 0){ showToast('Nenhuma ferramenta corresponde aos filtros atuais.'); return; }
-
-  const isFiltered = items.length !== state.tools.length;
-
-  const area = document.getElementById('printAllArea');
-  area.innerHTML = '';
-
-  const grid = document.createElement('div');
-  grid.style.display = 'grid';
-  grid.style.gridTemplateColumns = 'repeat(3, 1fr)';
-  grid.style.gap = '14px';
-
-  items.forEach(t=>{
-    const cell = document.createElement('div');
-    cell.className = 'print-cell';
-    const qrHolder = document.createElement('div');
-    cell.appendChild(qrHolder);
-    const name = document.createElement('div');
-    name.className = 'print-name';
-    name.textContent = t.name;
-    const code = document.createElement('div');
-    code.className = 'print-sku';
-    code.textContent = t.code;
-    cell.appendChild(name);
-    cell.appendChild(code);
-    grid.appendChild(cell);
-    new QRCode(qrHolder, {
-      text: buildToolQrUrl(t),
-      width: 110, height: 110,
-      colorDark: '#000000', colorLight: '#ffffff'
-    });
-  });
-
-  area.appendChild(grid);
-  showToast('Preparando impressão de ' + items.length + ' etiqueta(s) de ferramenta' + (isFiltered ? ' (filtro atual)' : '') + '...');
-  setTimeout(()=>{ window.print(); }, 350);
+  printLabels(items.map(t => ({ name: t.name, code: t.code, url: buildToolQrUrl(t) })));
 }
 
 /* Histórico de ferramentas */
@@ -3182,6 +3193,8 @@ function unlockApp(){
   initCloudSync();
 }
 
+renderLabelControls('labelControlsProducts');
+renderLabelControls('labelControlsTools');
 initLock();
 </script>
 </body>
